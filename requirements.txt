@@ -1,0 +1,14 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+sqlalchemy>=2.0,<3
+python-multipart>=0.0.20
+openai>=1.75,<4
+pydantic-settings>=2.8,<3
+numpy>=2.2
+opencv-python-headless>=4.11
+scipy>=1.15
+pillow>=11
+boto3>=1.37
+psycopg[binary]>=3.2
+pytest>=8
+httpx>=0.28

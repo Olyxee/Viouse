@@ -193,7 +193,7 @@ def local_metrics(signals, summary, start, end):
         framing = float(present.mean()) * (.45 * size + .3 * centred + .25 * head_room)
     return {'motion': _norm(float(np.percentile(subj, 80)), .003, .035),
             'motion_mean': float(subj.mean()),
-            'visual_quality': float(np.clip(.55 * sharpness + .45 * max(0, exposure) - min(.4, shake * 120), 0, 1)),
+            'visual_quality': float(np.clip(.55 * sharpness + .45 * max(0, exposure) - min(.25, shake * 60), 0, 1)),
             'sharpness': sharpness, 'exposure': float(max(0, exposure)), 'framing': float(np.clip(framing, 0, 1)),
             'subject_presence': float(present.mean()), 'shake': shake, 'camera_pan': pan,
             'brightness': float(np.median(luma))}
@@ -232,7 +232,12 @@ def moment_records(asset, clip, signals, summary):
     reps = summary.get('reps', [])
     impacts = summary.get('impacts', [])
     for i, m in enumerate(clip['moments']):
-        cut_start, cut_end = refine_cut(signals, m['best_start'], m['best_end'], m['peak_time'], (m['start'], m['end']))
+        best_start, best_end = m['best_start'], m['best_end']
+        if best_end - best_start > 6:
+            # The model's "best excerpt" can be a whole set; keep the 6 s around its peak.
+            best_start = max(m['start'], min(m['peak_time'] - 3.6, best_end - 6))
+            best_end = best_start + 6
+        cut_start, cut_end = refine_cut(signals, best_start, best_end, m['peak_time'], (m['start'], m['end']))
         local = local_metrics(signals, summary, cut_start, cut_end)
         inside_reps = [r for r in reps if m['start'] <= r['t'] <= m['end']]
         inside_impacts = [x for x in impacts if cut_start - .2 <= x['t'] <= cut_end + .2]

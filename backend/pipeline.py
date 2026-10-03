@@ -1,167 +1,187 @@
-import json
+"""Upload → Analyze → Understand → Select → Plan → Edit → Render → Evaluate → Improve.
+
+Each responsibility lives in its own module:
+  perception     deterministic per-frame signals          (perception.py)
+  understanding  multimodal clip logging + moment scoring  (understanding.py)
+  editorial      the edit concept / story                  (editorial.py)
+  timeline       precise, explainable edit operations      (timeline.py)
+  execution      frame-accurate renderer + audio mixer     (engine.py)
+  critic         technical + watched review → revisions    (critic.py)
+  preferences    creator style profile                     (style.py)
+"""
 import time
 from pathlib import Path
-from .config import settings, active_vision_model
-from .db import session, Project, Asset, Job, docs, save_doc
-from .preprocess import segment_video
-from .ai import AI
-from .audio import transcribe, audio_features
-from .planner import rank_segments, understand, create_plan, build_edl
-from .render import render
-from .media import frame
-from .schemas import Critic
+from .config import settings
+from .db import session, Project, Asset, Job, docs, save_doc, DOCUMENTS
 from .storage import publish_private
 
+MAX_RENDERS = 3
+
+
 def update(job_id, stage, detail):
+    if job_id is None:
+        print(f'[{stage}] {detail}', flush=True)
+        return
     with session() as db:
-        job = db.get(Job,job_id)
+        job = db.get(Job, job_id)
         if job is None: raise RuntimeError('Job deleted')
-        job.stage,job.detail,job.heartbeat = stage,detail,time.time()
-        project = db.get(Project,job.project_id)
+        job.stage, job.detail, job.heartbeat = stage, detail, time.time()
+        project = db.get(Project, job.project_id)
         project.status = stage
 
-def review(ai, output, plan, edl, directory):
-    paths,times = [],[]
-    for i,shot in enumerate(edl['timeline'][:30]):
-        at = shot['timeline_start']+shot['duration']*.5
-        p = Path(directory)/f'review-{i}.jpg'
-        frame(output,at,p)
-        paths.append(p)
-        times.append(at)
-    return ai.structured(Critic,'Review this actual rendered video using chronologically sampled frames (one per shot), exact shot timings, and the story. Acknowledge limitations of frame sampling; do not claim to have heard audio. Only recommend actionable changes supported by evidence. Request revision confidence >=0.8 only for clear improvements. '+json.dumps({'frame_times':times,'story':plan.model_dump(),'edl':edl}),paths).model_dump()
+
+def load_project(project_id):
+    with session() as db:
+        project = db.get(Project, project_id)
+        assets = db.query(Asset).filter_by(project_id=project_id).order_by(Asset.created_at).all()
+    videos = [a for a in assets if a.kind == 'video']
+    music = next((a for a in reversed(assets) if a.kind == 'music'), None)
+    references = [a for a in assets if a.kind == 'reference']
+    directory = settings.data_dir / 'projects' / project_id / 'work'
+    directory.mkdir(parents=True, exist_ok=True)
+    return project, assets, videos, music, references, directory
+
+
+def perceive_all(project, videos, directory, progress):
+    from .perception import perceive
+    out = {}
+    for i, asset in enumerate(videos):
+        progress(f'Analysing motion, framing and quality in clip {i + 1} of {len(videos)}')
+        out[asset.id] = perceive(asset, directory)
+    return out
+
+
+def understand_all(ai, project, videos, directory, progress):
+    """One multimodal pass per clip (cached by asset and model)."""
+    from .perception import make_proxy
+    from .understanding import understand_clip
+    model = settings.gemini_model
+    cached = {d.payload['asset_id']: d.payload for d in docs('clip_understanding', project.id) if d.payload.get('model') == model}
+    out = {}
+    for i, asset in enumerate(videos):
+        progress(f'Watching clip {i + 1} of {len(videos)}')
+        if asset.id in cached:
+            out[asset.id] = cached[asset.id]['clip']
+            continue
+        if asset.duration < 1.5:
+            out[asset.id] = {'summary': 'too short to use', 'location': '', 'people': [], 'main_subject': '', 'moments': []}
+        else:
+            proxy = make_proxy(asset.path, Path(directory) / f'{asset.id}-watch.mp4')
+            out[asset.id] = understand_clip(ai, proxy, asset.duration)
+        save_doc('clip_understanding', project.id, {'asset_id': asset.id, 'model': model, 'clip': out[asset.id]})
+    return out
+
+
+def build_moments(videos, perceived, understood):
+    from .understanding import moment_records, score_moments
+    records = []
+    for asset in videos:
+        signals, summary = perceived[asset.id]
+        records += moment_records(asset, understood[asset.id], signals, summary)
+    return score_moments(records)
+
 
 def process(job_id):
+    from .ai import AI
+    from .editorial import create_concept
+    from .timeline import plan_timeline, revise
+    from .engine import render_timeline
+    from .critic import evaluate
+    from .style import profile_for
+    from .music import analyze_music
+    from .understanding import select_candidates
     started = time.monotonic()
     ai = AI()
     with session() as db:
-        job = db.get(Job,job_id)
-        project = db.get(Project,job.project_id)
-        assets = db.query(Asset).filter_by(project_id=project.id).order_by(Asset.created_at).all()
-    videos = [a for a in assets if a.kind=='video']
-    music = next((a for a in reversed(assets) if a.kind=='music'),None)
-    directory = settings.data_dir/'projects'/project.id/'work'
-    directory.mkdir(parents=True,exist_ok=True)
-    metrics = {'clips':len(videos),'footage_seconds':sum(a.duration for a in videos),'cost_usd':None,'captions':job.metrics.get('captions',{})}
+        job = db.get(Job, job_id)
+        project_id, captions = job.project_id, job.metrics.get('captions', {})
+    project, assets, videos, music, references, directory = load_project(project_id)
     timings = {}
-    stage_started = time.monotonic()
-    update(job_id,'PREPROCESSING','Reading and segmenting all footage')
-    cached_segments = docs('segments',project.id)
-    segments = []
-    for i,asset in enumerate(videos):
-        existing = [d.payload for d in cached_segments if d.payload['asset_id']==asset.id]
-        if existing:
-            segments.extend(existing)
+
+    def stage(name, detail):
+        update(job_id, name, detail)
+
+    t = time.monotonic()
+    perceived = perceive_all(project, videos, directory, lambda m: stage('PREPROCESSING', m))
+    timings['perception'] = time.monotonic() - t
+    t = time.monotonic()
+    understood = understand_all(ai, project, videos, directory, lambda m: stage('ANALYZING', m))
+    stage('ANALYZING', 'Ranking every moment')
+    moments = build_moments(videos, perceived, understood)
+    save_doc('moments', project.id, {'moments': [{k: v for k, v in m.items() if k != 'embedding'} for m in moments]}, job_id)
+    candidates = select_candidates(moments)
+    timings['understanding'] = time.monotonic() - t
+    profile = profile_for(ai, project, references, directory, lambda m: stage('ANALYZING', m))
+    music_data = analyze_music(music.path, directory) if music else None
+
+    t = time.monotonic()
+    stage('PLANNING', 'Developing the editorial concept')
+    concept = create_concept(ai, candidates, understood, videos, project, profile, music_data)
+    concept_id = save_doc('concepts', project.id, concept, job_id)
+    timings['concept'] = time.monotonic() - t
+
+    versions = []
+    timeline = None
+    review = None
+    for attempt in range(MAX_RENDERS):
+        stage('EDITING', 'Planning cuts, speed, framing and sound' if attempt == 0 else f'Applying review fixes (pass {attempt + 1})')
+        if timeline is None:
+            timeline = plan_timeline(concept, moments, perceived, music, music_data, profile, captions)
         else:
-            produced = segment_video(asset,directory)
-            # Save whole asset segmentation atomically, avoiding partial cache hits.
-            from .db import DOCUMENTS
-            with session() as db:
-                for s in produced: db.add(DOCUMENTS['segments'](project_id=project.id,payload=s))
-            segments.extend(produced)
-        update(job_id,'PREPROCESSING',f'Prepared {i+1} of {len(videos)} clips')
-    timings['preprocessing'] = time.monotonic()-stage_started
-    stage_started = time.monotonic()
-    update(job_id,'ANALYZING','Understanding your footage')
-    analyses = {d.payload['segment_id']:d.payload for d in docs('analysis_results',project.id) if d.payload.get('model')==active_vision_model() and d.payload.get('provider','openai')==ai.provider}
-    for i,s in enumerate(segments):
-        cached = analyses.get(s['segment_id'])
-        if cached: s['analysis'] = cached['analysis']
-        else:
-            s['analysis'] = ai.analyze(s)
-            save_doc('analysis_results',project.id,{'segment_id':s['segment_id'],'analysis':s['analysis'],'model':active_vision_model(),'provider':ai.provider},job_id)
-        update(job_id,'ANALYZING',f'Understood {i+1} of {len(segments)} moments')
-    transcripts = []
-    speech_model=settings.gemini_model if ai.provider=='gemini' else 'whisper-1'
-    cached_transcripts = {d.payload['asset_id']:d.payload for d in docs('transcripts',project.id) if d.payload.get('provider','openai')==ai.provider and d.payload.get('model','whisper-1')==speech_model}
-    for i,a in enumerate(videos):
-        value = cached_transcripts.get(a.id)
-        if value is None:
-            value = transcribe(a,directory,ai)
-            value.update({'provider':ai.provider,'model':speech_model})
-            save_doc('transcripts',project.id,value,job_id)
-        transcripts.append(value)
-        update(job_id,'ANALYZING',f'Checked audio in {i+1} of {len(videos)} clips')
-    music_data = audio_features(music.path,directory) if music else {'beats':[],'drops':[],'bpm':None}
-    segments = rank_segments(segments)
-    workout = understand(ai,segments)
-    save_doc('workouts',project.id,workout,job_id)
-    for event in workout['important_events']: save_doc('event_groups',project.id,event,job_id)
-    timings['analysis'] = time.monotonic()-stage_started
-    update(job_id,'PLANNING','Choosing highlights and planning your story')
-    target = project.target_duration or min(60,max(30,sum(a.duration for a in videos)*.20))
-    target = round(min(target,sum(a.duration for a in videos)) * 30)/30
-    prior = [d.payload['story'] for d in docs('edit_plans',project.id) if d.job_id != job_id][-4:]
-    stage_started = time.monotonic()
-    plan = create_plan(ai,segments,workout,transcripts,target,project.style,music_data,prior)
-    timings['planning'] = time.monotonic()-stage_started
-    candidates = []
-    for revision in range(2):
-        plan_id = save_doc('edit_plans',project.id,plan.model_dump(),job_id)
-        update(job_id,'EDITING','Tracking the subject and building the timeline')
-        edl = build_edl(plan,segments,target,music_data['beats'])
-        edl['music'] = music_data
-        edl['captions'] = metrics['captions']
-        edl_id = save_doc('edit_decisions',project.id,edl,job_id)
-        outdir = settings.data_dir/'projects'/project.id/'renders'/job_id/str(revision+1)
-        update(job_id,'RENDERING',f'Rendering version {revision+1}')
-        stage_started = time.monotonic()
-        output, metadata = render(edl,assets,outdir,transcripts,music,lambda n,total:update(job_id,'RENDERING',f'Rendered {n} of {total} shots · version {revision+1}'))
-        timings[f'render_{revision+1}'] = time.monotonic()-stage_started
-        update(job_id,'REVIEWING',f'Reviewing version {revision+1}')
-        critic = review(ai,output,plan,edl,outdir)
-        save_doc('critic_results',project.id,critic,job_id)
+            timeline = revise(timeline, review, concept, moments, perceived, music, music_data, profile, captions)
+        timeline_id = save_doc('timelines', project.id, timeline, job_id)
+        outdir = settings.data_dir / 'projects' / project.id / 'renders' / job_id / str(attempt + 1)
+        t = time.monotonic()
+        output, metadata = render_timeline(timeline, assets, outdir, lambda n, total: stage('RENDERING', f'Rendering version {attempt + 1} · {n} of {total} shots'))
+        timings[f'render_{attempt + 1}'] = time.monotonic() - t
+        stage('REVIEWING', f'Watching version {attempt + 1} back')
+        review = evaluate(ai, output, timeline, perceived, outdir)
+        save_doc('critic_results', project.id, review, job_id)
         publish_private(output)
-        payload = {'edit_plan_id':plan_id,'edl_id':edl_id,'path':output,'duration':metadata['duration'],
-                   'critic':critic,'revision':revision+1,'style':plan.style,'source_clips_used':len({s['asset_id'] for s in edl['timeline']}),
-                   'total_clips':len(videos),'detected_moments':len(segments),'title':plan.title,'captions':metrics['captions']}
-        version_id = save_doc('video_versions',project.id,payload,job_id)
-        candidates.append((version_id,payload))
-        if revision==0 and critic['revision_confidence'] >= .8 and critic['recommended_changes']:
-            update(job_id,'PLANNING','Improving the edit after review')
-            try:
-                plan = create_plan(ai,segments,workout,transcripts,target,project.style,music_data,[],{'critic':critic,'previous_plan':plan.model_dump(),'previous_edl':edl})
-            except Exception as exc:
-                # A failed optional revision must not discard a valid, reviewed draft.
-                metrics['revision_skipped']=type(exc).__name__
-                break
-        else: break
-    best_id,best = max(candidates,key=lambda v:v[1]['critic']['overall'])
-    best_edl=next(d.payload for d in docs('edit_decisions',project.id) if d.id==best['edl_id'])
-    metrics.update({'segments':len(segments),'selected_segments':[s['segment_id'] for s in best_edl['timeline']],
-                    'rejected_segments':[s['segment_id'] for s in segments if s['segment_id'] not in {x['segment_id'] for x in best_edl['timeline']}],
-                    'critic_score':best['critic']['overall'],'revision_performed':len(candidates)>1,
-                    'best_version_id':best_id,'timings_seconds':timings,'total_seconds':time.monotonic()-started,'ai_calls':ai.calls})
-    with session() as db:
-        job = db.get(Job,job_id)
-        job.status,job.stage,job.detail,job.metrics = 'COMPLETED','COMPLETED','Your video is ready',metrics
-        db.get(Project,project.id).status = 'COMPLETED'
+        payload = {'timeline_id': timeline_id, 'edl_id': timeline_id, 'concept_id': concept_id, 'path': output,
+                   'duration': metadata['duration'], 'critic': review, 'revision': attempt + 1, 'style': concept.get('pacing', ''),
+                   'title': concept['title'], 'source_clips_used': len({s['asset_id'] for s in timeline['segments']}),
+                   'total_clips': len(videos), 'detected_moments': len(moments), 'captions': captions,
+                   'decisions': [{'purpose': s['purpose'], 'why': s['reasons']} for s in timeline['segments']]}
+        versions.append((save_doc('video_versions', project.id, payload, job_id), payload))
+        if review['passed']: break
+    best_id, best = max(versions, key=lambda v: v[1]['critic']['overall'])
+    metrics = {'clips': len(videos), 'footage_seconds': sum(a.duration for a in videos), 'moments': len(moments),
+               'candidates': len(candidates), 'renders': len(versions), 'critic_score': best['critic']['overall'],
+               'best_version_id': best_id, 'timings_seconds': timings, 'total_seconds': time.monotonic() - started,
+               'ai_calls': ai.calls, 'captions': captions}
+    if job_id:
+        with session() as db:
+            job = db.get(Job, job_id)
+            job.status, job.stage, job.detail, job.metrics = 'COMPLETED', 'COMPLETED', 'Your video is ready', {**job.metrics, **metrics}
+            db.get(Project, project.id).status = 'COMPLETED'
+    return best_id, best, metrics
+
 
 def process_caption_job(job_id):
-    """Rebuild the existing timeline from originals: never burn new text over old text."""
+    """Re-render the saved timeline with new subtitle settings; never burn text over text."""
     from copy import deepcopy
-    from .db import DOCUMENTS
     from .captions import checked_settings
+    from .engine import render_timeline
     with session() as db:
-        job=db.get(Job,job_id)
-        source=db.get(DOCUMENTS['video_versions'],job.metrics['source_version_id'])
-        if not source or source.project_id!=job.project_id: raise ValueError('Source version is unavailable')
-        decision=db.get(DOCUMENTS['edit_decisions'],source.payload['edl_id'])
-        if not decision or decision.project_id!=job.project_id: raise ValueError('Source timeline is unavailable')
-        edl=deepcopy(decision.payload)
-        assets=db.query(Asset).filter_by(project_id=job.project_id).order_by(Asset.created_at).all()
-    captions=checked_settings(job.metrics['captions'],edl['duration']).model_dump()
-    edl['captions']=captions
-    transcripts=list({d.payload['asset_id']:d.payload for d in docs('transcripts',job.project_id)}.values())
-    music=next((a for a in reversed(assets) if a.kind=='music'),None)
-    update(job_id,'RENDERING','Styling subtitles on your existing edit')
-    outdir=settings.data_dir/'projects'/job.project_id/'renders'/job_id/'1'
-    output,metadata=render(edl,assets,outdir,transcripts,music,lambda n,total:update(job_id,'RENDERING',f'Prepared {n} of {total} shots for subtitles'))
+        job = db.get(Job, job_id)
+        source = db.get(DOCUMENTS['video_versions'], job.metrics['source_version_id'])
+        if not source or source.project_id != job.project_id: raise ValueError('Source version is unavailable')
+        decision = db.get(DOCUMENTS['timelines'], source.payload.get('timeline_id', ''))
+        if not decision or decision.project_id != job.project_id: raise ValueError('Source timeline is unavailable')
+        timeline = deepcopy(decision.payload)
+        assets = db.query(Asset).filter_by(project_id=job.project_id).order_by(Asset.created_at).all()
+    timeline['captions'] = checked_settings(job.metrics['captions'], timeline['duration']).model_dump()
+    update(job_id, 'RENDERING', 'Styling subtitles on your existing edit')
+    outdir = settings.data_dir / 'projects' / job.project_id / 'renders' / job_id / '1'
+    output, metadata = render_timeline(timeline, assets, outdir, lambda n, total: update(job_id, 'RENDERING', f'Prepared {n} of {total} shots for subtitles'))
     publish_private(output)
-    edl_id=save_doc('edit_decisions',job.project_id,edl,job_id)
-    payload={**source.payload,'path':output,'duration':metadata['duration'],'edl_id':edl_id,'captions':captions,'source_version_id':source.id,'subtitle_only':True}
-    version_id=save_doc('video_versions',job.project_id,payload,job_id)
+    timeline_id = save_doc('timelines', job.project_id, timeline, job_id)
+    payload = {**source.payload, 'path': output, 'duration': metadata['duration'], 'timeline_id': timeline_id, 'edl_id': timeline_id,
+               'captions': timeline['captions'], 'source_version_id': source.id, 'subtitle_only': True}
+    version_id = save_doc('video_versions', job.project_id, payload, job_id)
     with session() as db:
-        current=db.get(Job,job_id)
-        current.metrics={**job.metrics,'best_version_id':version_id,'ai_calls':[]}
-        current.status,current.stage,current.detail='COMPLETED','COMPLETED','Your subtitled video is ready'
-        db.get(Project,job.project_id).status='COMPLETED'
+        current = db.get(Job, job_id)
+        current.metrics = {**job.metrics, 'best_version_id': version_id, 'ai_calls': []}
+        current.status, current.stage, current.detail = 'COMPLETED', 'COMPLETED', 'Your subtitled video is ready'
+        db.get(Project, job.project_id).status = 'COMPLETED'

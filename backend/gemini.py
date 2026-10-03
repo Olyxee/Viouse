@@ -43,10 +43,17 @@ def json_schema(schema):
         return result
     return normalize(schema.model_json_schema())
 
-def generate(key,model,schema,prompt,images=(),audio=None,calls=None):
-    parts=[{'text':prompt}]+[media_part(p,'image/jpeg') for p in images]
+def generate(key,model,schema,prompt,images=(),audio=None,calls=None,video=None,video_fps=None,media_resolution=None,max_tokens=16384):
+    parts=[]
+    if video:
+        # Video first so the model watches before reading the question; audio track included.
+        part=media_part(video,'video/mp4')
+        if video_fps: part['videoMetadata']={'fps':video_fps}
+        parts.append(part)
+    parts+=[{'text':prompt}]+[media_part(p,'image/jpeg') for p in images]
     if audio: parts.append(media_part(audio,'audio/wav'))
-    config={'responseMimeType':'application/json','responseJsonSchema':json_schema(schema), 'maxOutputTokens':16384}
+    config={'responseMimeType':'application/json','responseJsonSchema':json_schema(schema), 'maxOutputTokens':max_tokens}
+    if media_resolution: config['mediaResolution']=media_resolution
     endpoint=f'https://generativelanguage.googleapis.com/v1beta/models/{quote(model,safe="-")}:generateContent'
     with httpx.Client(timeout=180,follow_redirects=False) as client:
         for attempt in range(5):

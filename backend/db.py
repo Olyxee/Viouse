@@ -70,7 +70,16 @@ def document_model(name):
 
 DOCUMENTS = {name: document_model(name) for name in (
     'segments', 'analysis_results', 'event_groups', 'transcripts', 'edit_plans',
-    'edit_decisions', 'video_versions', 'critic_results', 'feedback', 'workouts')}
+    'edit_decisions', 'video_versions', 'critic_results', 'feedback', 'workouts',
+    'clip_understanding', 'moments', 'concepts', 'timelines')}
+
+class CreatorProfile(Base):
+    """Learned editing preferences for one creator (from reference edits and feedback)."""
+    __tablename__ = 'creator_profiles'
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[float] = mapped_column(Float, default=time.time)
 
 engine = create_engine(settings.database_url, connect_args={'check_same_thread': False, 'timeout': 30} if settings.database_url.startswith('sqlite') else {}, pool_pre_ping=True)
 if settings.database_url.startswith('sqlite'):

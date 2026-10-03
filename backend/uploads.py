@@ -24,7 +24,7 @@ class IncomingAsset:
         self.project_id,self.kind=project_id,kind
         self.filename=Path(filename.replace('\\','/')).name
         suffix=Path(self.filename).suffix.lower()
-        if suffix not in (('.mp4','.mov','.webm') if kind=='video' else ('.mp3','.wav','.m4a','.aac','.ogg','.flac')):
+        if suffix not in (('.mp4','.mov','.webm') if kind in ('video','reference') else ('.mp3','.wav','.m4a','.aac','.ogg','.flac')):
             raise HTTPException(415,'Unsupported file type')
         with session() as db:
             project=db.get(Project,project_id)
@@ -64,7 +64,7 @@ class IncomingAsset:
         try: metadata=probe(self.path)
         except Exception: raise HTTPException(422,'This file could not be read. Try exporting it as MP4 or WAV.') from None
         if metadata['duration']<.5: raise HTTPException(422,'Clips must be at least half a second long')
-        if self.kind=='video' and not metadata['has_video']: raise HTTPException(422,'The file contains no video')
+        if self.kind in ('video','reference') and not metadata['has_video']: raise HTTPException(422,'The file contains no video')
         if self.kind=='music' and not metadata['has_audio']: raise HTTPException(422,'The file contains no audio')
         digest=self.checksum.hexdigest()
         with session() as db:

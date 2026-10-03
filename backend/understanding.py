@@ -63,9 +63,88 @@ def understand_clip(ai, proxy, duration):
     if ai.provider != 'gemini':
         raise RuntimeError('Clip understanding requires Gemini video input')
     fps = 2 if duration <= 150 else 1
-    result = generate(settings.gemini_api_key, settings.gemini_model, ClipUnderstanding, PROMPT.format(duration=duration),
-                      video=proxy, video_fps=fps, media_resolution='MEDIA_RESOLUTION_LOW', calls=ai.calls, max_tokens=32768)
-    return sanitize(result.model_dump(), duration)
+    prompt = PROMPT.format(duration=duration)
+    best = None
+    for attempt in range(2):
+        result = generate(settings.gemini_api_key, settings.gemini_model, ClipUnderstanding, prompt,
+                          video=proxy, video_fps=fps, media_resolution='MEDIA_RESOLUTION_LOW', calls=ai.calls, max_tokens=32768)
+        clip = as_seconds(result.model_dump(), duration)
+        clip = sanitize(clip, duration)
+        cover = coverage(clip, duration)
+        if best is None or cover > best[0]: best = (cover, clip)
+        if cover >= .6: break
+        prompt = (PROMPT.format(duration=duration) + f' Your previous log only covered {cover * 100:.0f}% of the clip. Timestamps must be '
+                  'plain decimal SECONDS (e.g. 75.5, never 1:15 or 1.15 for one minute fifteen), and moments must span 0 to the end.')
+    return best[1]
+
+
+class LoggedClip(ClipUnderstanding):
+    clip_number: int = Field(description='The number of the clip, as labelled before each video')
+
+
+class BatchUnderstanding(Strict):
+    clips: list[LoggedClip]
+
+
+BATCH_SECONDS = 420
+BATCH_BYTES = 14 * 1024 * 1024
+
+
+def batches(items):
+    """Group (asset, proxy) pairs so one request watches several clips (fewer API calls)."""
+    groups, cur, secs, size = [], [], 0.0, 0
+    for asset, proxy in items:
+        b = proxy.stat().st_size
+        if cur and (secs + asset.duration > BATCH_SECONDS or size + b > BATCH_BYTES or len(cur) >= 10):
+            groups.append(cur)
+            cur, secs, size = [], 0.0, 0
+        cur.append((asset, proxy))
+        secs += asset.duration
+        size += b
+    if cur: groups.append(cur)
+    return groups
+
+
+def understand_batch(ai, group):
+    """Log several clips in one multimodal request; returns {asset_id: clip log}."""
+    from .gemini import generate
+    from .config import settings
+    if len(group) == 1:
+        asset, proxy = group[0]
+        return {asset.id: understand_clip(ai, proxy, asset.duration)}
+    listing = '; '.join(f'Clip {i + 1} lasts {a.duration:.2f} s' for i, (a, _) in enumerate(group))
+    prompt = (PROMPT.format(duration=0).split(' The clip duration')[0] +
+              f' You are given {len(group)} separate clips. Log EVERY clip separately, with timestamps in plain decimal seconds '
+              f'from the start of THAT clip (never M:SS). {listing}. Return one entry per clip with its clip_number.')
+    fps = 1 if sum(a.duration for a, _ in group) > 200 else 2
+    result = generate(settings.gemini_api_key, settings.gemini_model, BatchUnderstanding, prompt, video=[p for _, p in group],
+                      video_fps=fps, media_resolution='MEDIA_RESOLUTION_LOW', calls=ai.calls, max_tokens=60000)
+    out = {}
+    for logged in result.clips:
+        if not 1 <= logged.clip_number <= len(group): continue
+        asset = group[logged.clip_number - 1][0]
+        clip = logged.model_dump()
+        clip.pop('clip_number')
+        clip = sanitize(as_seconds(clip, asset.duration), asset.duration)
+        if coverage(clip, asset.duration) >= .5: out[asset.id] = clip
+    return out
+
+
+def coverage(clip, duration):
+    return sum(m['end'] - m['start'] for m in clip['moments']) / max(duration, .1)
+
+
+def as_seconds(clip, duration):
+    """Repair answers written as M.SS (e.g. 1.15 meaning 75 s) when they clearly under-cover the clip."""
+    ends = [m['end'] for m in clip['moments']]
+    if duration < 20 or not ends or max(ends) > duration * .5 or max(ends) > 10: return clip
+    def conv(v):
+        minutes = int(v)
+        seconds = round((v - minutes) * 100, 2)
+        return minutes * 60 + seconds if seconds < 60 else v
+    for m in clip['moments']:
+        for k in ('start', 'end', 'peak_time', 'best_start', 'best_end'): m[k] = conv(m[k])
+    return clip
 
 
 def sanitize(clip, duration):

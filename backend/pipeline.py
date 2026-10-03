@@ -54,21 +54,30 @@ def perceive_all(project, videos, directory, progress):
 def understand_all(ai, project, videos, directory, progress):
     """One multimodal pass per clip (cached by asset and model)."""
     from .perception import make_proxy
-    from .understanding import understand_clip
+    from .understanding import understand_batch, batches, coverage
     model = settings.gemini_model
-    cached = {d.payload['asset_id']: d.payload for d in docs('clip_understanding', project.id) if d.payload.get('model') == model}
+    cached = {d.payload['asset_id']: d.payload for d in docs('clip_understanding', project.id)
+              if d.payload.get('model') == model and coverage(d.payload['clip'], next((a.duration for a in videos if a.id == d.payload['asset_id']), 1)) >= .5}
     out = {}
-    for i, asset in enumerate(videos):
-        progress(f'Watching clip {i + 1} of {len(videos)}')
-        if asset.id in cached:
-            out[asset.id] = cached[asset.id]['clip']
-            continue
-        if asset.duration < 1.5:
+    pending = []
+    for asset in videos:
+        if asset.id in cached: out[asset.id] = cached[asset.id]['clip']
+        elif asset.duration < 1.5:
             out[asset.id] = {'summary': 'too short to use', 'location': '', 'people': [], 'main_subject': '', 'moments': []}
+            save_doc('clip_understanding', project.id, {'asset_id': asset.id, 'model': model, 'clip': out[asset.id]})
         else:
-            proxy = make_proxy(asset.path, Path(directory) / f'{asset.id}-watch.mp4')
-            out[asset.id] = understand_clip(ai, proxy, asset.duration)
-        save_doc('clip_understanding', project.id, {'asset_id': asset.id, 'model': model, 'clip': out[asset.id]})
+            pending.append((asset, make_proxy(asset.path, Path(directory) / f'{asset.id}-watch.mp4')))
+    groups = batches(pending)
+    for gi, group in enumerate(groups):
+        progress(f'Watching footage: {len(out)} of {len(videos)} clips understood')
+        logged = understand_batch(ai, group)
+        # Clips a batch could not log reliably are watched again on their own.
+        for asset, proxy in group:
+            if asset.id not in logged: logged.update(understand_batch(ai, [(asset, proxy)]))
+        for asset, _ in group:
+            out[asset.id] = logged[asset.id]
+            save_doc('clip_understanding', project.id, {'asset_id': asset.id, 'model': model, 'clip': out[asset.id]})
+    progress(f'Watched all {len(videos)} clips')
     return out
 
 
@@ -81,7 +90,7 @@ def build_moments(videos, perceived, understood):
     return score_moments(records)
 
 
-def process(job_id):
+def process(job_id, project_id=None, captions=None):
     from .ai import AI
     from .editorial import create_concept
     from .timeline import plan_timeline, revise
@@ -92,9 +101,11 @@ def process(job_id):
     from .understanding import select_candidates
     started = time.monotonic()
     ai = AI()
-    with session() as db:
-        job = db.get(Job, job_id)
-        project_id, captions = job.project_id, job.metrics.get('captions', {})
+    if job_id:
+        with session() as db:
+            job = db.get(Job, job_id)
+            project_id, captions = job.project_id, job.metrics.get('captions', {})
+    captions = captions or {'mode': 'auto'}
     project, assets, videos, music, references, directory = load_project(project_id)
     timings = {}
 
@@ -130,7 +141,7 @@ def process(job_id):
         else:
             timeline = revise(timeline, review, concept, moments, perceived, music, music_data, profile, captions)
         timeline_id = save_doc('timelines', project.id, timeline, job_id)
-        outdir = settings.data_dir / 'projects' / project.id / 'renders' / job_id / str(attempt + 1)
+        outdir = settings.data_dir / 'projects' / project.id / 'renders' / (job_id or f'bench-{int(time.time())}') / str(attempt + 1)
         t = time.monotonic()
         output, metadata = render_timeline(timeline, assets, outdir, lambda n, total: stage('RENDERING', f'Rendering version {attempt + 1} · {n} of {total} shots'))
         timings[f'render_{attempt + 1}'] = time.monotonic() - t

@@ -186,7 +186,7 @@ def get_project(project_id:str,user=Depends(current_user)):
             'captions':job.metrics.get('captions',{}) if job else {}}
 
 @app.post('/api/projects/{project_id}/assets')
-def upload(project_id:str,file:UploadFile=File(...),kind:Literal['video','music']='video',user=Depends(current_user)):
+def upload(project_id:str,file:UploadFile=File(...),kind:Literal['video','music','reference']='video',user=Depends(current_user)):
     incoming=None
     try:
         incoming=IncomingAsset(project_id,user.id,file.filename or '',kind,file.size)
@@ -197,7 +197,7 @@ def upload(project_id:str,file:UploadFile=File(...),kind:Literal['video','music'
         file.file.close()
 
 @app.put('/api/projects/{project_id}/assets')
-async def stream_upload(project_id:str,request:Request,filename:str,kind:Literal['video','music']='video',user=Depends(current_user)):
+async def stream_upload(project_id:str,request:Request,filename:str,kind:Literal['video','music','reference']='video',user=Depends(current_user)):
     try: expected=int(request.headers['content-length']) if 'content-length' in request.headers else None
     except ValueError: raise HTTPException(400,'Invalid upload length') from None
     incoming=await run_in_threadpool(IncomingAsset,project_id,user.id,filename,kind,expected)
@@ -222,7 +222,7 @@ def remove_asset(project_id:str,asset_id:str,user=Depends(current_user)):
 
 class StartEdit(BaseModel):
     style:Literal['automatic','high-energy','cinematic']='automatic'
-    target_duration:Literal[0,30,45,60]=45
+    target_duration:Literal[0,30,45,60]=0
     process_consent:bool=False
     captions:CaptionSettings=Field(default_factory=CaptionSettings)
 

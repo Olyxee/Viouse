@@ -45,9 +45,10 @@ def json_schema(schema):
 
 def generate(key,model,schema,prompt,images=(),audio=None,calls=None,video=None,video_fps=None,media_resolution=None,max_tokens=16384):
     parts=[]
-    if video:
-        # Video first so the model watches before reading the question; audio track included.
-        part=media_part(video,'video/mp4')
+    for index,clip in enumerate([video] if isinstance(video,(str,Path)) else (video or [])):
+        # Videos first so the model watches before reading the question; audio tracks included.
+        if not isinstance(video,(str,Path)): parts.append({'text':f'Clip {index+1}:'})
+        part=media_part(clip,'video/mp4')
         if video_fps: part['videoMetadata']={'fps':video_fps}
         parts.append(part)
     parts+=[{'text':prompt}]+[media_part(p,'image/jpeg') for p in images]

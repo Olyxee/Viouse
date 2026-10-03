@@ -115,8 +115,10 @@ def create_concept(ai, candidates, understood, videos, project, profile, music, 
     clips = [{'source': a.filename, 'summary': understood[a.id]['summary'], 'people': understood[a.id]['people']} for a in videos if a.id in understood]
     payload = {'candidates': [public(c) for c in candidates], 'clips': clips}
     if feedback: payload['revision_request'] = feedback
+    requested = {'high-energy': 'The creator asked for fast pacing (pacing="fast").',
+                 'cinematic': 'The creator asked for a cinematic, more spacious edit (pacing="slow_build" or "medium").'}.get(project.style, '')
     prompt = PROMPT.format(lo=lo, hi=hi, profile=json.dumps((profile or {}).get('editorial', {})),
-                           music=json.dumps(music_summary(music)) if music else 'none supplied; natural gym audio and subtle sound design') + '\n' + json.dumps(payload)
+                           music=json.dumps(music_summary(music)) if music else 'none supplied; natural gym audio and subtle sound design') + ' ' + requested + '\n' + json.dumps(payload)
     errors = []
     for _ in range(3):
         concept = ai.structured(Concept, prompt + ('\nFix these problems from your previous answer: ' + json.dumps(errors) if errors else ''), [sheet])

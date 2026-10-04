@@ -105,3 +105,23 @@ def test_local_key_setup_checks_connection_saves_privately_and_requires_local_ac
         assert result.status_code==200
         assert 'test-gemini-private-key' not in result.text
         assert 'test-gemini-private-key' in (tmp_path/'.env').read_text()
+
+@pytest.fixture(autouse=True)
+def single_model(monkeypatch,request):
+    import backend.gemini as g
+    monkeypatch.setattr(g,'EXHAUSTED',{})
+    if 'fallback' not in request.node.name: monkeypatch.setattr(g,'FALLBACK_MODELS',())
+
+def test_gemini_daily_quota_falls_back_to_next_model(monkeypatch):
+    import backend.gemini as g
+    monkeypatch.setattr(g,'FALLBACK_MODELS',('backup-model',))
+    seen=[]
+    def handler(request):
+        seen.append(request.url.path)
+        if 'primary' in request.url.path:
+            return httpx.Response(429,json={'error':{'details':[{'retryDelay':'11260s'}]}})
+        return httpx.Response(200,json=response())
+    real_client=httpx.Client
+    with patch('backend.gemini.time.sleep'), patch('backend.gemini.httpx.Client',side_effect=lambda **kwargs:real_client(transport=httpx.MockTransport(handler),**kwargs)):
+        assert generate('test','primary',ConnectionProbe,'check').status=='ok'
+    assert any('backup-model' in p for p in seen)

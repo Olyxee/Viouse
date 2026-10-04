@@ -55,6 +55,26 @@ def generate(key,model,schema,prompt,images=(),audio=None,calls=None,video=None,
     if audio: parts.append(media_part(audio,'audio/wav'))
     config={'responseMimeType':'application/json','responseJsonSchema':json_schema(schema), 'maxOutputTokens':max_tokens}
     if media_resolution: config['mediaResolution']=media_resolution
+    # Free-tier quotas are per model: when one model's daily quota is spent (or it stays
+    # overloaded), the same request moves to the next Gemini model instead of failing.
+    chain=[model]+[m for m in FALLBACK_MODELS if m!=model]
+    last=None
+    for candidate_model in chain:
+        if EXHAUSTED.get(candidate_model,0)>time.time(): continue
+        try:
+            return _request(key,candidate_model,schema,parts,config,calls)
+        except GeminiError as exc:
+            last=exc
+            if exc.status_code==429 or exc.status_code in (404,500,502,503,504):
+                EXHAUSTED[candidate_model]=time.time()+(3600 if exc.status_code==429 else 600)
+                continue
+            raise
+    raise last or GeminiError(429)
+
+FALLBACK_MODELS=('gemini-flash-latest','gemini-3.5-flash-lite','gemini-flash-lite-latest')
+EXHAUSTED={}   # model → time it may be tried again
+
+def _request(key,model,schema,parts,config,calls):
     endpoint=f'https://generativelanguage.googleapis.com/v1beta/models/{quote(model,safe="-")}:generateContent'
     with httpx.Client(timeout=180,follow_redirects=False) as client:
         for attempt in range(5):

@@ -131,3 +131,18 @@ def test_model_timestamps_are_repaired_and_scored():
     assert scored[0]['score_factors']['uniqueness'] < scored[2]['score_factors']['uniqueness']
     chosen = select_candidates(scored, limit=2)
     assert {c['clip_id'] for c in chosen} == {'a', 'c'} or {c['clip_id'] for c in chosen} == {'b', 'c'}
+
+
+def test_behind_person_captions_and_caption_policy(clip):
+    from backend.engine import caption_policy
+    asset, signals, summary = clip
+    moments = [moment('a', 0, 3, 1.2), moment('bb', 3, 7, 5.0)]
+    c = concept([shot('a', 'hook'), shot('bb', 'climax')], 'bb')
+    tl = plan_timeline(c, moments, {'clip': (signals, summary)}, None, None, None, {'mode': 'auto', 'style': 'behind'})
+    tl['width'], tl['height'] = 270, 480
+    tl['speech_events'] = [{'start': 2.0, 'end': 4.5, 'text': 'one more rep'},
+                           {'start': 4.5, 'end': 6.0, 'text': 'this is a very long line of chatter nobody needs to read on screen'}]
+    kept = caption_policy(tl)
+    assert [e['text'] for e in kept] == ['one more rep']
+    out, meta = render_timeline(tl, [asset], TEST_DIR / 'behind')
+    assert meta['has_audio'] and (TEST_DIR / 'behind' / 'captions.ass').exists()

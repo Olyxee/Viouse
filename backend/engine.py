@@ -334,6 +334,31 @@ def mix_audio(timeline, by_id, music_asset, directory):
     return path
 
 
+# ── captions ─────────────────────────────────────────────────────────────────────
+
+MAX_CAPTIONS = 3
+
+
+def run_in(directory, *args):
+    """FFmpeg from the render folder, so subtitle paths never contain Windows drive colons."""
+    result = subprocess.run([binary('ffmpeg'), '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', *[str(a) for a in args]],
+                            cwd=directory, capture_output=True, timeout=3600)
+    if result.returncode: raise RuntimeError(result.stderr.decode('utf-8', 'replace')[-3000:])
+
+
+def caption_policy(timeline):
+    """Subtitles only where words carry the moment: short lines, after the hook, at most three."""
+    hook_end = max([o['end'] for o in timeline.get('overlays', [])] + [0]) + .1
+    events = []
+    for e in timeline.get('speech_events', []):
+        words = e['text'].split()
+        if not words or len(words) > 8: continue
+        start = max(e['start'], hook_end)
+        if e['end'] - start < .8: continue
+        events.append({'start': start, 'end': min(e['end'], start + max(1.2, .45 * len(words) + .6)), 'text': ' '.join(words)})
+    return events[:MAX_CAPTIONS]
+
+
 # ── main ─────────────────────────────────────────────────────────────────────────
 
 def render_timeline(timeline, assets, directory, progress=lambda *a: None):
@@ -345,10 +370,12 @@ def render_timeline(timeline, assets, directory, progress=lambda *a: None):
     W, H = WORK if OW / OH == WORK[0] / WORK[1] and OW > WORK[0] else (OW, OH)
     total_frames = int(round(timeline['duration'] * fps))
     vf = [f'scale={OW}:{OH}:flags=lanczos', 'unsharp=5:5:0.45:5:5:0.0']
-    events, caption_settings = selected_events(timeline.get('captions'), timeline.get('speech_events', []), timeline['duration'])
+    events, caption_settings = selected_events(timeline.get('captions'), caption_policy(timeline), timeline['duration'])
+    behind = bool(events) and caption_settings.style == 'behind'
     if events:
         write_captions(events, directory / 'captions.ass', caption_settings.model_dump())
-        vf.append('subtitles=filename=captions.ass')
+        # Behind-the-person captions are composited after the person mask is computed.
+        if not behind: vf.append('subtitles=filename=captions.ass')
     video = directory / 'video.mp4'
     encoder = subprocess.Popen([binary('ffmpeg'), '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                                 '-s', f'{W}x{H}', '-r', str(fps), '-i', '-', '-vf', ','.join(vf), '-c:v', 'libx264', '-preset', 'fast',
@@ -395,6 +422,17 @@ def render_timeline(timeline, assets, directory, progress=lambda *a: None):
         raise RuntimeError(encoder.stderr.read().decode('utf-8', 'replace')[-3000:])
     finally:
         if encoder.poll() is None: encoder.kill()
+    if behind:
+        from .captions import person_mask
+        layered = directory / 'video-behind.mp4'
+        person_mask(video, directory / 'person-mask.mp4')
+        run_in(directory, '-i', video, '-i', directory / 'person-mask.mp4', '-filter_complex',
+               f'[0:v]split[clean][letters];[letters]subtitles=filename=captions.ass[text];[1:v]scale={OW}:{OH},format=gray[mask];'
+               '[text][clean][mask]maskedmerge[v]', '-map', '[v]', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+               '-pix_fmt', 'yuv420p', layered)
+        video.unlink(missing_ok=True)
+        layered.rename(video)
+        (directory / 'person-mask.mp4').unlink(missing_ok=True)
     music_asset = by_id.get((timeline.get('music') or {}).get('asset_id'))
     audio = mix_audio(timeline, by_id, music_asset, directory)
     output = directory / 'final.mp4'

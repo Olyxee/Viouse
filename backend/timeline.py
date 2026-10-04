@@ -255,7 +255,7 @@ def choose_transitions(segments, perceived, profile):
         if out_mag > .008 or in_mag > .008: why = 'cut on action'
         if used < cap and i - last_special >= 3:
             if cur['purpose'] == 'climax' and prev['purpose'] != 'climax':
-                tr, why = {'type': 'zoom', 'duration': .2}, 'zoom transition punches into the hero moment'
+                tr, why = {'type': 'zoom', 'duration': .3}, 'zoom transition punches into the hero moment'
             elif abs(out_dx) > .006 and abs(in_dx) > .004 and np.sign(out_dx) == np.sign(in_dx):
                 tr = {'type': 'whip', 'duration': .2, 'direction': 'left' if out_dx < 0 else 'right'}
                 why = 'both shots move the same way, so a whip carries the motion across the cut'

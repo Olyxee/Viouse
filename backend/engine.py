@@ -169,7 +169,7 @@ def shape_transition(img, kind, progress, direction, outgoing):
         moved = cv2.warpAffine(img, M, (W, H), borderMode=cv2.BORDER_REFLECT)
         return motion_blur(moved, (8 + p * 110) * W / 1080)
     if kind == 'zoom':
-        s = 1 + .28 * p
+        s = 1 + .18 * p
         M = cv2.getRotationMatrix2D((W / 2, H / 2), 0, s)
         zoomed = cv2.warpAffine(img, M, (W, H), borderMode=cv2.BORDER_REFLECT)
         if p > .15:

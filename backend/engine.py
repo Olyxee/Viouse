@@ -302,6 +302,9 @@ def mix_audio(timeline, by_id, music_asset, directory):
         at = int(fx['at'] * SR)
         end = min(total, at + len(clip))
         if at < total: mix[at:end] += clip[:end - at]
+    # Every edit ends cleanly: a short fade on the whole mix.
+    tail = min(total, int(SR * .7))
+    if tail: mix[-tail:] *= np.linspace(1, 0, tail)[:, None] ** 1.3
     # Gentle limiter: unity below -3 dBFS, smooth knee above.
     peak = np.abs(mix).max() + 1e-9
     mix = mix / max(1.0, peak / .95)

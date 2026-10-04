@@ -209,9 +209,10 @@ def stabilization(signals, start, end, camera_motion, zoom):
     shake = float(np.hypot(np.diff(dx), np.diff(dy)).mean())
     if camera_motion not in ('handheld', 'moving', 'chaotic') and shake < .0018: return None, []
     cx, cy = np.cumsum(dx), np.cumsum(dy)
-    ox, oy = cx - gaussian_filter1d(cx, ANALYSIS_FPS * .6, mode='nearest'), cy - gaussian_filter1d(cy, ANALYSIS_FPS * .6, mode='nearest')
+    ox, oy = cx - gaussian_filter1d(cx, ANALYSIS_FPS * 1.0, mode='nearest'), cy - gaussian_filter1d(cy, ANALYSIS_FPS * 1.0, mode='nearest')
     margin = (1 - 1 / zoom) / 2 if zoom > 1 else 0
-    limit = max(.012, margin * .8)
+    # Shaky footage earns a little extra crop so the correction has room to work.
+    limit = max(.03 if shake > .003 else .015, margin * .8)
     ox, oy = np.clip(ox, -limit, limit), np.clip(oy, -limit, limit)
     keys = [{'t': float(tt), 'dx': round(float(a), 5), 'dy': round(float(b), 5)} for tt, a, b in zip(t[sel], ox, oy)]
     return {'keys': keys, 'min_zoom': round(1 + 2.2 * limit, 4)}, ['stabilised handheld shake']
@@ -334,7 +335,7 @@ def sound_design(segments, music_data):
     for seg in segments:
         tr = seg['transition_in']
         if tr['type'] in ('whip', 'zoom'):
-            sfx.append({'type': 'whoosh', 'at': round(seg['timeline_start'] - .12, 3), 'gain': .45, 'reason': f"accent for the {tr['type']} transition"})
+            sfx.append({'type': 'whoosh', 'at': round(seg['timeline_start'] - .21, 3), 'gain': .45, 'reason': f"accent for the {tr['type']} transition"})
     hero = next((s for s in segments if s.get('hero')), None)
     if hero:
         peak_t = hero['timeline_start'] + hero.get('peak_offset', 0)

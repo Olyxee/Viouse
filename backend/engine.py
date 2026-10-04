@@ -371,7 +371,13 @@ def render_timeline(timeline, assets, directory, progress=lambda *a: None):
     total_frames = int(round(timeline['duration'] * fps))
     vf = [f'scale={OW}:{OH}:flags=lanczos', 'unsharp=5:5:0.45:5:5:0.0']
     events, caption_settings = selected_events(timeline.get('captions'), caption_policy(timeline), timeline['duration'])
-    behind = bool(events) and caption_settings.style == 'behind'
+    behind_text = caption_settings.mode != 'off' and caption_settings.style == 'behind'
+    text_overlays = [o for o in timeline.get('overlays', []) if o['type'] == 'text']
+    if behind_text and text_overlays:
+        # In behind-the-person mode the hook title is layered behind the subject too.
+        events = sorted([{'start': o['start'], 'end': o['end'], 'text': o['text']} for o in text_overlays] + list(events), key=lambda e: e['start'])
+        text_overlays = []
+    behind = bool(events) and behind_text
     if events:
         write_captions(events, directory / 'captions.ass', caption_settings.model_dump())
         # Behind-the-person captions are composited after the person mask is computed.
@@ -380,7 +386,7 @@ def render_timeline(timeline, assets, directory, progress=lambda *a: None):
     encoder = subprocess.Popen([binary('ffmpeg'), '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                                 '-s', f'{W}x{H}', '-r', str(fps), '-i', '-', '-vf', ','.join(vf), '-c:v', 'libx264', '-preset', 'fast',
                                 '-crf', '18', '-pix_fmt', 'yuv420p', '-r', str(fps), str(video)], stdin=subprocess.PIPE, stderr=subprocess.PIPE, cwd=directory)
-    overlays = [(o, text_layer(o['text'], W, size=int(86 * W / 1080))) for o in timeline.get('overlays', []) if o['type'] == 'text']
+    overlays = [(o, text_layer(o['text'], W, size=int(86 * W / 1080))) for o in text_overlays]
     written = 0
     segments = timeline['segments']
     try:

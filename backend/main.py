@@ -258,12 +258,9 @@ def restyle_captions(project_id:str,body:RestyleCaptions,user=Depends(current_us
         if not version or version.project_id!=project_id: raise HTTPException(404,'Version not found')
         try: checked_settings(body.captions.model_dump(),version.payload['duration'])
         except ValueError as exc: raise HTTPException(422,str(exc)) from None
-        if body.captions.mode=='auto':
-            from .render import caption_events
-            edl=db.get(DOCUMENTS['edit_decisions'],version.payload['edl_id'])
-            transcripts=[d.payload for d in docs('transcripts',project_id)]
-            if not edl or not caption_events(edl.payload,transcripts):
-                raise HTTPException(422,'No detected speech in this edit. Choose Write my own to add text.')
+        timeline=db.get(DOCUMENTS['timelines'],version.payload.get('timeline_id',''))
+        if not timeline: raise HTTPException(422,'This version was made by an older editor; generate a new edit to restyle it.')
+
         lock=db.execute(update(Project).where(Project.id==project_id,Project.status.notin_(BUSY)).values(status='QUEUED'))
         if lock.rowcount!=1: raise HTTPException(409,'An edit is already running')
         job=Job(project_id=project_id,metrics={'kind':'captions','source_version_id':body.version_id,'captions':body.captions.model_dump()})

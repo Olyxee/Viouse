@@ -15,7 +15,7 @@ from .engine import decode_audio
 from .media import ffmpeg
 
 Fix = Literal['replace_shot', 'remove_shot', 'trim_head', 'trim_tail', 'shorten', 'remove_effect', 'reframe_wider',
-              'move_earlier', 'drop_hook_text', 'shorter_overall', 'none']
+              'move_earlier', 'drop_hook_text', 'drop_captions', 'shorter_overall', 'none']
 Category = Literal['awkward_cut', 'repeated_shot', 'dead_time', 'broken_transition', 'bad_crop', 'subject_out_of_frame',
                    'excessive_effect', 'inconsistent_color', 'weak_opening', 'pacing', 'too_long_section', 'audio_problem',
                    'text_problem', 'render_error', 'weak_shot', 'other']
@@ -51,7 +51,8 @@ PROMPT = ('You are a demanding senior short-form editor reviewing a finished ver
           'inconsistent colour, a weak opening, pacing problems, sections that drag, audio problems (peaks, accidental silence, '
           'harsh sound effects), on-screen text problems and render glitches. Only report issues you actually observe; '
           'for each, choose the single most effective fix. Prefer replace_shot for weak/irrelevant shots, trim_head/trim_tail '
-          'for bad starts/ends, shorten for shots that drag, remove_effect for unnecessary effects, reframe_wider for bad crops. '
+          'for bad starts/ends, shorten for shots that drag, remove_effect for unnecessary effects, reframe_wider for bad crops, '
+          'drop_hook_text for a bad opening title, drop_captions for unreadable or distracting subtitles. '
           'Automated measurements are included; treat them as evidence. Shot list and measurements:\n')
 
 
@@ -199,6 +200,12 @@ def evaluate(ai, output, timeline, perceived, directory):
                       calls=ai.calls, max_tokens=24576).model_dump()
     proxy.unlink(missing_ok=True)
     issues = [dict(i, source='watched') for i in review['issues']] + measured['issues']
+    hook_end = max([o['end'] for o in timeline['overlays']] + [0])
+    for i in issues:
+        # Text complaints after the opening title are about subtitles, not the hook text.
+        if i['fix'] == 'drop_hook_text' and 0 <= i['shot_index'] < len(timeline['segments']) and timeline['segments'][i['shot_index']]['timeline_start'] >= hook_end:
+            i['fix'] = 'drop_captions'
+            i['shot_index'] = -1
     n = len(timeline['segments'])
     technical_penalty = min(.3, sum(i['severity'] for i in measured['issues']) * .05)
     overall = round(.7 * review['overall'] + .3 * review['human_editor_believability'] - technical_penalty, 4)
@@ -206,7 +213,7 @@ def evaluate(ai, output, timeline, perceived, directory):
     for issue in sorted(issues, key=lambda i: i['severity'], reverse=True):
         if issue['fix'] == 'none' or issue['severity'] < .4: continue
         index = issue['shot_index'] if 0 <= issue['shot_index'] < n else None
-        if index is None and issue['fix'] not in ('drop_hook_text', 'shorter_overall'): continue
+        if index is None and issue['fix'] not in ('drop_hook_text', 'drop_captions', 'shorter_overall'): continue
         key = (index, issue['fix'])
         if key in seen or (index is not None and any(f['index'] == index and f['op'] in ('replace_shot', 'remove_shot') for f in fixes)): continue
         seen.add(key)

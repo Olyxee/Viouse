@@ -388,7 +388,7 @@ def plan_timeline(concept, moments, perceived, music_asset, music_data, profile,
         if 'keep_speech' in s['treatment'] and m['speech']: cap = max(cap, 6.5)
         ceilings.append(cap)
     lengths = [max(.7, min(a, b * scale, c)) for a, b, c in zip(avail, base, ceilings)]
-    lengths = [overrides.get('lengths', {}).get(str(i), L) for i, L in enumerate(lengths)]
+    lengths = [s.get('adjust', {}).get('length', L) for s, L in zip(shots, lengths)]
     segments = []
     cursor = 0.0
     for i, s in enumerate(shots):
@@ -396,9 +396,10 @@ def plan_timeline(concept, moments, perceived, music_asset, music_data, profile,
         asset_id = m['asset_id']
         signals, summary = perceived[asset_id]
         hero = s['clip_id'] == hero_id
-        treatments = [t for t in s['treatment'] if t not in overrides.get('removed_effects', {}).get(str(i), [])]
+        adjust = s.get('adjust', {})
+        treatments = [t for t in s['treatment'] if t not in adjust.get('removed_effects', [])] or ['none']
         start, end, reasons = choose_window(m, lengths[i], s['section'], signals, hero)
-        trim = overrides.get('trims', {}).get(str(i))
+        trim = adjust.get('trims')
         if trim:
             start = float(np.clip(start + trim.get('head', 0), m['start'], end - .7))
             end = float(np.clip(end - trim.get('tail', 0), start + .7, m['end']))
@@ -419,7 +420,7 @@ def plan_timeline(concept, moments, perceived, music_asset, music_data, profile,
                 if speed_keys[0]['t'] > start: speed_keys.insert(0, {'t': start, 'speed': speed_keys[0]['speed']})
         meta = {'width': summary['width'], 'height': summary['height']}
         reframe, why = reframe_plan(meta, signals, summary, start, end, s['section'], treatments, hero, m)
-        if overrides.get('fit', {}).get(str(i)): reframe['keys'] = [{**k, 'z': 1.0} for k in reframe['keys']]; why = ['reframed wider after review']
+        if adjust.get('fit'): reframe['keys'] = [{**k, 'z': 1.0} for k in reframe['keys']]; why = ['reframed wider after review']
         reasons += why
         stab, why = stabilization(signals, start, end, m['camera_motion'], max(k['z'] for k in reframe['keys']))
         if stab:
@@ -471,8 +472,10 @@ def plan_timeline(concept, moments, perceived, music_asset, music_data, profile,
     if hook_text and len(hook_text.split()) <= 7:
         overlays.append({'type': 'text', 'text': hook_text, 'start': .1, 'end': round(min(2.8, max(1.6, segments[0]['duration'] + .4)), 3),
                          'position': 'upper_third', 'style': 'hook', 'reason': 'states the hook while the opening shot plays'})
-    speech_events = [{'start': s['timeline_start'] + .05, 'end': s['timeline_end'] - .05, 'text': s['audio']['speech']}
-                     for s in segments if s['audio']['keep_speech'] and s['audio']['speech']]
+    # Captions only for short, meaningful lines; long chatter becomes unreadable flashing text.
+    speech_events = [] if overrides.get('captions_off') else [
+        {'start': s['timeline_start'] + .05, 'end': s['timeline_end'] - .05, 'text': s['audio']['speech']}
+        for s in segments if s['audio']['keep_speech'] and s['audio']['speech'] and len(s['audio']['speech'].split()) <= 10]
     return {
         'version': 2, 'fps': FPS, 'width': WIDTH, 'height': HEIGHT, 'aspect_ratio': '9:16',
         'duration_target': round(target, 3), 'duration': round(frames / FPS, 4), 'frames': frames,
@@ -491,6 +494,7 @@ def revise(timeline, review, concept, moments, perceived, music_asset, music_dat
     by_id = {m['clip_id']: m for m in moments}
     ranked = sorted(moments, key=lambda m: m['score'], reverse=True)
     removed = set()
+    moves = []
     for fix in review.get('fixes', []):
         i = fix.get('index')
         op = fix['op']
@@ -512,25 +516,26 @@ def revise(timeline, review, concept, moments, perceived, music_asset, music_dat
         elif op == 'remove_shot' and len(shots) - len(removed) > 5 and shots[i]['clip_id'] != state['hero_clip_id']:
             removed.add(i)
         elif op in ('trim_head', 'trim_tail'):
-            t = overrides.setdefault('trims', {}).setdefault(key, {'head': 0, 'tail': 0})
-            t['head' if op == 'trim_head' else 'tail'] += float(np.clip(fix.get('seconds', .5), .2, 2))
+            t = shots[i].setdefault('adjust', {}).setdefault('trims', {'head': 0, 'tail': 0})
+            t['head' if op == 'trim_head' else 'tail'] += float(np.clip(fix.get('seconds') or .5, .2, 2))
         elif op == 'shorten':
             seg = timeline['segments'][i]
-            overrides.setdefault('lengths', {})[key] = max(.8, seg['source_end'] - seg['source_start'] - float(np.clip(fix.get('seconds', .6), .2, 3)))
+            shots[i].setdefault('adjust', {})['length'] = max(.8, seg['source_end'] - seg['source_start'] - float(np.clip(fix.get('seconds') or .6, .2, 3)))
         elif op == 'remove_effect':
-            overrides.setdefault('removed_effects', {})[key] = [t for t in shots[i]['treatment'] if t != 'none'] + ['slow_motion_peak', 'punch_in', 'push_in', 'speed_ramp']
+            shots[i].setdefault('adjust', {})['removed_effects'] = [t for t in shots[i]['treatment'] if t != 'none'] + ['slow_motion_peak', 'punch_in', 'push_in', 'speed_ramp']
         elif op == 'reframe_wider':
-            overrides.setdefault('fit', {})[key] = True
+            shots[i].setdefault('adjust', {})['fit'] = True
         elif op == 'move_earlier' and i > 1:
-            shots.insert(i - 1, shots.pop(i))
+            moves.append(i)
         elif op == 'drop_hook_text':
             overrides['hook_text'] = ''
+        elif op == 'drop_captions':
+            overrides['captions_off'] = True
         elif op == 'shorter_overall':
-            overrides['target_duration'] = max(15, timeline['duration'] * .85)
-    if removed:
-        shots = [s for j, s in enumerate(shots) if j not in removed]
-        for name in ('trims', 'lengths', 'removed_effects', 'fit'):
-            overrides.pop(name, None)
+            overrides['target_duration'] = max(15, timeline['duration'] * .8)
+    for i in sorted(moves):
+        shots.insert(i - 1, shots.pop(i))
+    shots = [s for j, s in enumerate(shots) if j not in removed]
     if shots[0]['section'] != 'hook': shots[0] = {**shots[0], 'section': 'hook'}
     overrides['shots'] = shots
     return plan_timeline(concept, moments, perceived, music_asset, music_data, profile, captions, overrides)

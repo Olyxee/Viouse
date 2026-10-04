@@ -136,7 +136,17 @@ def process(job_id, project_id=None, captions=None):
     review = None
     for attempt in range(MAX_RENDERS):
         stage('EDITING', 'Planning cuts, speed, framing and sound' if attempt == 0 else f'Applying review fixes (pass {attempt + 1})')
-        if timeline is None:
+        rethink = review is not None and attempt == 1 and (review['review']['story'] < .5 or review['review']['human_editor_believability'] < .45)
+        if rethink:
+            # The story itself did not work: rethink the concept with the critic's notes, not just patch shots.
+            stage('PLANNING', 'Rethinking the edit after review')
+            notes = {'previous_title': concept['title'], 'previous_shots': [s['clip_id'] for s in concept['shots']],
+                     'critic_problems': [i['detail'] for i in review['issues'] if i['severity'] >= .5][:12],
+                     'instruction': 'Build a materially better, tighter and more coherent edit that fixes these problems.'}
+            concept = create_concept(ai, candidates, understood, videos, project, profile, music_data, feedback=notes)
+            concept_id = save_doc('concepts', project.id, concept, job_id)
+            timeline = plan_timeline(concept, moments, perceived, music, music_data, profile, captions)
+        elif timeline is None:
             timeline = plan_timeline(concept, moments, perceived, music, music_data, profile, captions)
         else:
             timeline = revise(timeline, review, concept, moments, perceived, music, music_data, profile, captions)

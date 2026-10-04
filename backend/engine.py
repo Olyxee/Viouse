@@ -81,15 +81,35 @@ class SourceReader:
         a = self.get(k)
         if a is None: raise ValueError('Source ended before the requested frame')
         frac = x - k
-        if blend and frac > .08:
+        if blend and .08 < frac < .92:
             b = self.get(k + 1)
-            if b is not None and b is not a: return cv2.addWeighted(a, 1 - frac, b, frac, 0)
+            if b is not None and b is not a and not np.array_equal(a[::16, ::16], b[::16, ::16]):
+                return interpolate(a, b, frac)
         return a
 
     def close(self):
         self.proc.stdout.close()
         self.proc.kill()
         self.proc.wait()
+
+
+_DIS = None
+
+
+def interpolate(a, b, frac):
+    """Motion-compensated in-between frame (optical flow), so slow motion stays sharp, not ghosted."""
+    global _DIS
+    if _DIS is None: _DIS = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+    h, w = a.shape[:2]
+    sw, sh = w // 2, h // 2
+    ga = cv2.cvtColor(cv2.resize(a, (sw, sh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+    gb = cv2.cvtColor(cv2.resize(b, (sw, sh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+    fab = cv2.resize(_DIS.calc(ga, gb, None), (w, h)) * 2
+    fba = cv2.resize(_DIS.calc(gb, ga, None), (w, h)) * 2
+    gx, gy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    wa = cv2.remap(a, gx - fab[..., 0] * frac, gy - fab[..., 1] * frac, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    wb = cv2.remap(b, gx - fba[..., 0] * (1 - frac), gy - fba[..., 1] * (1 - frac), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    return cv2.addWeighted(wa, 1 - frac, wb, frac, 0)
 
 
 # ── look ─────────────────────────────────────────────────────────────────────────

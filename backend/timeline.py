@@ -166,7 +166,9 @@ def reframe_plan(meta, signals, summary, start, end, section, treatments, hero, 
         else:
             ccx, ccy = .5, .5
         ccx, ccy = clamp_center(ccx, ccy, bw, bh, z)
-        keys.append({'t': float(times[i]), 'cx': round(ccx, 4), 'cy': round(ccy, 4), 'z': round(z, 4)})
+        key = {'t': float(times[i]), 'cx': round(ccx, 4), 'cy': round(ccy, 4), 'z': round(z, 4)}
+        if present > .3: key['head'] = round(float(head), 4)
+        keys.append(key)
     if moving and present > .3: reasons.append('smoothly follows the subject as they move')
     # Camera-style motion: only where it adds intent.
     if hero and ('push_in' in treatments or 'slow_motion_peak' in treatments):
@@ -194,7 +196,12 @@ def reframe_plan(meta, signals, summary, start, end, section, treatments, hero, 
             for k in keys: k['z'] = round(k['z'] * (1 + .06 * (k['t'] - start) / max(.1, end - start)), 4)
             keys[-1]['t'] = end
             reasons.append('subtle push-in keeps a static shot alive')
-    for k in keys: k['cx'], k['cy'] = clamp_center(k['cx'], k['cy'], bw, bh, k['z'])
+    for k in keys:
+        if 'head' in k:
+            # Zoom moves keep headroom: the crop never slides over the top of the subject.
+            h = bh / k['z']
+            k['cy'] = min(k['cy'], k['head'] + h / 2 - .07 * h)
+        k['cx'], k['cy'] = clamp_center(k['cx'], k['cy'], bw, bh, k['z'])
     if keys[0]['t'] > start: keys.insert(0, {**keys[0], 't': start})
     if keys[-1]['t'] < end: keys.append({**keys[-1], 't': end})
     return {'mode': 'track', 'base': [bw, bh], 'keys': keys}, reasons
@@ -226,7 +233,7 @@ def colour_plan(signals, start, end, look):
     gain = float(np.clip((TARGET_LUMA / max(.05, luma)) ** .65, .82, 1.4))
     reasons = []
     if abs(gain - 1) > .06: reasons.append(f'exposure {"lifted" if gain > 1 else "pulled down"} to match the other shots')
-    corr_a, corr_b = -.65 * a, -.65 * (b - TARGET_CAST_B)
+    corr_a, corr_b = -.8 * a, -.8 * (b - TARGET_CAST_B)
     if abs(corr_a) + abs(corr_b) > 2.5: reasons.append('white balance normalised')
     sat_gain = float(np.clip(look['saturation'] * (.32 / max(.08, sat)) ** .25, .85, 1.25))
     return {'exposure': round(gain, 4), 'shift_a': round(corr_a, 3), 'shift_b': round(corr_b, 3),
@@ -476,9 +483,10 @@ def plan_timeline(concept, moments, perceived, music_asset, music_data, profile,
         overlays.append({'type': 'text', 'text': hook_text, 'start': .1, 'end': round(min(2.8, max(1.6, segments[0]['duration'] + .4)), 3),
                          'position': 'upper_third', 'style': 'hook', 'reason': 'states the hook while the opening shot plays'})
     # Captions only for short, meaningful lines; long chatter becomes unreadable flashing text.
+    hook_end = max([o['end'] for o in overlays] + [0]) + .1
     speech_events = [] if overrides.get('captions_off') else [
-        {'start': s['timeline_start'] + .05, 'end': s['timeline_end'] - .05, 'text': s['audio']['speech']}
-        for s in segments if s['audio']['keep_speech'] and s['audio']['speech'] and len(s['audio']['speech'].split()) <= 10]
+        {'start': max(hook_end, s['timeline_start'] + .05), 'end': s['timeline_end'] - .05, 'text': s['audio']['speech']}
+        for s in segments if s['audio']['keep_speech'] and s['audio']['speech'] and len(s['audio']['speech'].split()) <= 10 and s['timeline_end'] - .05 > hook_end + .4]
     return {
         'version': 2, 'fps': FPS, 'width': WIDTH, 'height': HEIGHT, 'aspect_ratio': '9:16',
         'duration_target': round(target, 3), 'duration': round(frames / FPS, 4), 'frames': frames,

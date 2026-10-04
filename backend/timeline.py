@@ -14,6 +14,7 @@ WIDTH, HEIGHT = 1080, 1920
 MAX_ZOOM = 1.25
 ZOOM_CEILING = 1.38   # absolute limit including camera moves (576-px sources upscale 1.9× already)
 SECTION_BASE = {'hook': 1.7, 'establishing': 1.8, 'build': 1.6, 'intensity': 1.35, 'climax': 3.0, 'payoff': 2.2, 'ending': 2.6}
+SECTION_CAP = {'hook': 2.6, 'establishing': 3.0, 'build': 2.8, 'intensity': 2.4, 'climax': 5.5, 'payoff': 4.0, 'ending': 4.0}
 PACING = {'fast': .9, 'medium': 1.15, 'slow_build': 1.3}
 TARGET_LUMA = .46
 TARGET_CAST_B = 2.5      # keep a touch of warmth so skin stays natural
@@ -378,7 +379,15 @@ def plan_timeline(concept, moments, perceived, music_asset, music_data, profile,
         if abs(total - target) < .05: break
         scale *= target / max(total, .1)
         scale = float(np.clip(scale, .45, 2.2))
-    lengths = [max(.7, min(a, b * scale)) for a, b in zip(avail, base)]
+    # Shots never drag: a ceiling per purpose (speech and the hero may run longer).
+    ceilings = []
+    for s in shots:
+        m = by_id[s['clip_id']]
+        cap = SECTION_CAP.get(s['section'], 3.2) * (profile or {}).get('shot_length_scale', 1.0)
+        if s['clip_id'] == hero_id: cap = max(cap, 5.5)
+        if 'keep_speech' in s['treatment'] and m['speech']: cap = max(cap, 6.5)
+        ceilings.append(cap)
+    lengths = [max(.7, min(a, b * scale, c)) for a, b, c in zip(avail, base, ceilings)]
     lengths = [overrides.get('lengths', {}).get(str(i), L) for i, L in enumerate(lengths)]
     segments = []
     cursor = 0.0

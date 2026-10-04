@@ -49,7 +49,7 @@ PROMPT = ('You are the lead editor of a fitness creator channel. Below are the s
           'is the hero/climax and where it lands (roughly 60-80% through), and how it ends (a payoff: reaction, final rep, '
           'celebration, or a clean button). Order shots for story and energy, NOT chronologically or by clip. '
           'Every shot must earn its place; avoid near-identical shots (same exercise, same angle) unless deliberately showing progression. '
-          'Keep the edit tight: {lo:.0f}-{hi:.0f} seconds, typically 8-18 shots. Treatments are optional and must serve the action: '
+          'Keep the edit tight: {lo:.0f}-{hi:.0f} seconds, typically 8-18 shots of 1.2-3.5 s each (the hero and meaningful speech may run longer). Treatments are optional and must serve the action: '
           'slow motion only on a genuinely strong peak (usually only the hero), punch-in for static shots that need energy, keep_speech only '
           'when the words matter, impact_accent when a weight lands. Most shots should be ["none"]. '
           'Humour and personality are welcome when the footage has them. Use only clip_ids from the list. '
@@ -85,8 +85,9 @@ def contact_sheet(candidates, videos, path, cols=6, tile=(150, 266)):
 
 def duration_range(candidates, profile):
     usable = sum(min(4, c['cut_end'] - c['cut_start']) for c in candidates)
-    hi = float(np.clip(usable * .55, 15, 60))
-    lo = float(np.clip(hi * .55, 15, 40))
+    # Short-form rewards tight edits: aim well below the usable total.
+    hi = float(np.clip(usable * .3, 18, 45))
+    lo = float(np.clip(hi * .6, 15, 30))
     if profile and profile.get('typical_duration'):
         mid = float(np.clip(profile['typical_duration'], 15, 60))
         lo, hi = max(15, mid * .75), min(60, mid * 1.25)

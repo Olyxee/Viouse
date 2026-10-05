@@ -1,9 +1,44 @@
-.venv/
-.tools/
-data/
+# Secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
 __pycache__/
+*.pyc
 .pytest_cache/
+
+# Node
 frontend/node_modules/
-frontend/dist/
+node_modules/
+*.tsbuildinfo
+
+# Local tools (FFmpeg, models)
+.tools/
+
+# Local state: database, logs, projects, renders, screenshots
+data/
+uploads/
 *.log
+*.db
+*.sqlite
+
+# Large media
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wav
+*.mp3
+*.m4a
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

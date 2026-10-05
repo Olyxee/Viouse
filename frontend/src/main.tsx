@@ -1,75 +1,142 @@
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {ArrowLeft, ArrowUpRight, Check, ChevronRight, Download, Film, LoaderCircle, Music2, Plus, RefreshCw, ShieldCheck, Trash2, Upload, X, Zap} from 'lucide-react';
+import {LoaderCircle, Settings} from 'lucide-react';
 import './style.css';
-import {CaptionStudio,defaultCaptions,type CaptionSettings} from './CaptionStudio';
+import {api, BUSY, type Health, type Project} from './api';
+import {Home} from './Home';
+import {KeySetup} from './KeySetup';
+import {ProjectView} from './Project';
+import {ErrorBanner} from './ui';
 
-type Asset={id:string;filename:string;kind:string;duration:number;metadata:{width:number;height:number}};
-type Version={decisions?:{purpose:string;why:string[]}[];captions?:CaptionSettings;id:string;duration:number;source_clips_used:number;total_clips:number;detected_moments:number;style:string;title:string};
-type Project={captions?:CaptionSettings;id:string;name:string;status:string;style:string;target_duration:number;created_at:number;assets?:Asset[];job?:{kind?:string;id:string;status:string;stage:string;detail:string;error:string|null};versions?:Version[];best_version_id?:string};
-const stages=['QUEUED','PREPROCESSING','ANALYZING','PLANNING','EDITING','RENDERING','REVIEWING','COMPLETED'];
-const labels=['Waiting for the editor','Analysing every frame','Watching and ranking moments','Developing the edit concept','Planning cuts, speed and framing','Rendering your video','Watching it back and improving','Ready to watch'];
-const duration=(s:number)=>`${Math.floor(s/60)}m ${Math.round(s%60)}s`;
-async function api(path:string, init:RequestInit={}) {
-  const res=await fetch('/api'+path,{...init,headers:{...(init.body instanceof FormData?{}:{'Content-Type':'application/json'}),...init.headers}});
-  const data=await res.json().catch(()=>({detail:'The server could not be reached'}));
-  if(!res.ok) throw new Error(typeof data.detail==='string'?data.detail:'Please check your input and try again');
-  return data;
-}
-function App(){
-  const [user,setUser]=useState<{email:string}|null>(null),[checking,setChecking]=useState(true),[projects,setProjects]=useState<Project[]>([]),[project,setProject]=useState<Project|null>(null);
-  const [aiReady,setAiReady]=useState(false),[keyInput,setKeyInput]=useState(''),[provider,setProvider]=useState('gemini'),[showKeySetup,setShowKeySetup]=useState(false);
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false),[uploading,setUploading]=useState(''),[drag,setDrag]=useState(false);
-  const [captions,setCaptions]=useState<CaptionSettings>(defaultCaptions);
-  const [length,setLength]=useState(0),[style,setStyle]=useState('automatic'),[consent,setConsent]=useState(false);
-  const [name,setName]=useState(''),[feedback,setFeedback]=useState(''),[feedbackDone,setFeedbackDone]=useState(false),[deleteConfirm,setDeleteConfirm]=useState(false);
-  const fileInput=useRef<HTMLInputElement>(null),musicInput=useRef<HTMLInputElement>(null),refInput=useRef<HTMLInputElement>(null);
-  const projectRef=useRef<string|null>(null);
-  const working=!!project?.job && !['COMPLETED','FAILED'].includes(project.job.status);
-  const version=project?.versions?.find(v=>v.id===project.best_version_id);
-  useEffect(()=>{api('/local-session',{method:'POST'}).then(setUser).catch(e=>setError(e.message)).finally(()=>setChecking(false));},[]);
-  useEffect(()=>{if(user) Promise.all([api('/projects'),api('/health')]).then(([p,h])=>{setProjects(p);setAiReady(h.ai_configured);setProvider(h.provider)}).catch(e=>setError(e.message));},[user]);
-  useEffect(()=>{if(!working || !project)return;const id=project.id;const timer=setInterval(()=>{api('/projects/'+id).then(p=>{if(projectRef.current===id)setProject(p)}).catch(e=>setError(e.message));},2000);return()=>clearInterval(timer);},[project?.id,working]);
-  async function act(fn:()=>Promise<void>){setError('');setBusy(true);try{await fn()}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
-  async function open(id:string){const p=await api('/projects/'+id);projectRef.current=id;setProject(p);setLength(p.target_duration);setStyle(p.style);setCaptions({...defaultCaptions,...p.captions});setFeedbackDone(false);setDeleteConfirm(false);}
-  async function refresh(id:string){const p=await api('/projects/'+id);if(projectRef.current===id)setProject(p);}
-  async function home(){projectRef.current=null;setProject(null);setProjects(await api('/projects'));setError('');}
-  async function newProject(){const p=await api('/projects',{method:'POST',body:JSON.stringify({name:name.trim()||`Reel · ${new Date().toLocaleDateString(undefined,{month:'short',day:'numeric'})}`})});setName('');setConsent(false);await open(p.id);}
-  async function upload(files:FileList|File[],kind='video'){
-    if(!project || working || busy)return;
-    const id=project.id;setError('');setBusy(true);
-    const failures:string[]=[];
-    try{for(const [i,file] of Array.from(files).entries()){
-      setUploading(`Uploading ${i+1} of ${files.length} · ${file.name}`);
-      try{await api(`/projects/${id}/assets?kind=${kind}&filename=${encodeURIComponent(file.name)}`,{method:'PUT',headers:{'Content-Type':'application/octet-stream'},body:file})}catch(e){failures.push(`${file.name}: ${(e as Error).message}`)}
-    }await refresh(id);if(failures.length)setError(failures.join('\n'));}finally{setUploading('');setBusy(false);if(fileInput.current)fileInput.current.value='';if(musicInput.current)musicInput.current.value='';if(refInput.current)refInput.current.value='';}
+function App() {
+  const [ready, setReady] = useState(false);
+  const [checking, setChecking] = useState(true);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [project, setProject] = useState<Project | null>(null);
+  const [aiReady, setAiReady] = useState(false);
+  const [showKeySetup, setShowKeySetup] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api('/local-session', {method: 'POST'})
+      .then(() => setReady(true))
+      .catch(e => setError((e as Error).message))
+      .finally(() => setChecking(false));
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    Promise.all([api<Project[]>('/projects'), api<Health>('/health')])
+      .then(([p, h]) => {
+        setProjects(p);
+        setAiReady(h.ai_configured);
+      })
+      .catch(e => setError((e as Error).message));
+  }, [ready]);
+
+  // Keep "Working" badges on the home screen up to date.
+  const anyWorking = !project && projects.some(p => BUSY.includes(p.status));
+  useEffect(() => {
+    if (!anyWorking) return;
+    const timer = setInterval(() => {
+      api<Project[]>('/projects').then(setProjects).catch(() => undefined);
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [anyWorking]);
+
+  async function act(fn: () => Promise<void>) {
+    setError('');
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
-  async function removeMusic(){if(!project)return;for(const a of project.assets?.filter(a=>a.kind==='music')||[])await api(`/projects/${project.id}/assets/${a.id}`,{method:'DELETE'});await refresh(project.id)}
-  async function connectGemini(){await api('/settings/gemini',{method:'POST',body:JSON.stringify({api_key:keyInput.trim()})});setKeyInput('');setAiReady(true);setProvider('gemini');setShowKeySetup(false)}
-  async function start(){if(!project)return;await api(`/projects/${project.id}/jobs`,{method:'POST',body:JSON.stringify({style,target_duration:length,process_consent:consent,captions})});await open(project.id)}
-  async function restyle(){if(!project||!version)return;await api(`/projects/${project.id}/captions`,{method:'POST',body:JSON.stringify({version_id:version.id,captions})});await open(project.id)}
-  async function rate(rating:string){if(!project||!version)return;await api(`/projects/${project.id}/feedback`,{method:'POST',body:JSON.stringify({version_id:version.id,rating,text:feedback,research_consent:false})});setFeedbackDone(true)}
-  const clips=project?.assets?.filter(a=>a.kind==='video')||[],music=project?.assets?.filter(a=>a.kind==='music').at(-1),references=project?.assets?.filter(a=>a.kind==='reference')||[];
-  const total=clips.reduce((n,a)=>n+a.duration,0);
-  const failed=project?.job?.status==='FAILED';
-  return <><header><button className="brand" onClick={()=>user&&act(home)} aria-label="All projects"><span className="brand-icon"><Film size={21}/></span>Autonomous <span className="brand-light">Editor</span></button><div className="header-right"><span className="edition">CREATOR REELS</span>{user&&aiReady&&!working&&<button className="header-action" onClick={()=>setShowKeySetup(true)}>AI settings</button>}</div></header>
-  <main>{error&&<div className="error" role="alert">{error}<button className="icon" aria-label="Dismiss error" onClick={()=>setError('')}><X size={18}/></button></div>}
-  {user&&(!aiReady||showKeySetup)&&<section className="key-setup"><div><h2>Connect Gemini</h2><p>Get a key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>, then paste it here. It is saved on this computer and never displayed again.</p><p className="key-note">Free-tier limits apply. Google may use free-tier content to improve its products. Use non-sensitive test footage.</p></div><form onSubmit={e=>{e.preventDefault();act(connectGemini)}}><label htmlFor="gemini-key">Gemini API key</label><input id="gemini-key" type="password" autoComplete="off" spellCheck={false} value={keyInput} onChange={e=>setKeyInput(e.target.value)} placeholder="Paste your Gemini key" required minLength={20} maxLength={256}/><button className="primary" disabled={busy||keyInput.trim().length<20}>{busy?<LoaderCircle className="spin" size={18}/>:null}Connect Gemini</button></form></section>}
-  {checking?<div className="loading"><LoaderCircle className="spin"/>Opening your workspace…</div>:!project?<>
-    <div className="page-heading"><div><span className="eyebrow">YOUR WORKSPACE</span><h1>More creating.<br/><span>Less editing.</span></h1><p>Your footage. Your perspective. A reel worth sharing.</p></div><div className="new-video"><label className="sr-only" htmlFor="project-name">Project name</label><input id="project-name" placeholder="Name your reel (optional)" value={name} maxLength={120} onChange={e=>setName(e.target.value)}/><button className="primary" disabled={busy} onClick={()=>act(newProject)}><Plus size={20}/>New Video</button></div></div>
-    <section className="projects"><div className="section-title"><h2>Your videos</h2><span>{projects.length} projects</span></div>{!projects.length?<div className="empty"><div className="empty-icon"><Film size={30}/></div><h3>Your next reel starts here.</h3><p>Create a project and drop in your raw clips.<br/>We’ll take it from there.</p><button className="text-button" onClick={()=>act(newProject)}>Make your first video <ArrowUpRight size={16}/></button></div>:<div className="project-grid">{projects.map(p=><button className="project-card" key={p.id} onClick={()=>act(()=>open(p.id))}><div className="project-art"><Film size={36}/><span>{p.status==='COMPLETED'?'READY TO WATCH':p.status.replaceAll('_',' ')}</span></div><div className="project-card-info"><div><h3>{p.name}</h3><small>{new Date(p.created_at*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'})}</small></div><ChevronRight size={20}/></div></button>)}</div>}</section>
-    <div className="workspace-footer"><span>RAW FOOTAGE IN.</span><span>FINISHED VIDEO OUT.</span></div>
-  </>:<>
-    <nav className="breadcrumb"><button onClick={()=>act(home)}><ArrowLeft size={16}/>Projects</button><span>{project.name}</span></nav>
-    {working?<section className="processing"><div className="process-symbol"><Zap size={32}/></div><span className="eyebrow">CREATING YOUR REEL</span><h1>Your video is<br/><span>coming together.</span></h1><p>You can close this page. We’ll keep working.</p><ol className="steps">{stages.slice(1,-1).map((s,i)=>{const current=stages.indexOf(project.job!.stage),index=i+1;return <li key={s} className={index===current?'active':index<current?'done':''}><span>{index<current?<Check size={17}/>:index===current?<LoaderCircle size={17} className="spin"/>:String(index).padStart(2,'0')}</span><div>{labels[index]}{index===current&&<small>{project.job!.detail}</small>}</div></li>})}</ol></section>:version&&(!failed||project.job?.kind==='captions')?<><section className="result"><div className="player-wrap"><video key={version.id} controls playsInline preload="metadata" src={`/api/projects/${project.id}/versions/${version.id}/video`}/><span>{Math.round(version.duration)} sec · 1080 × 1920</span></div><div className="result-copy">{failed&&<div className="error" role="alert">{project.job?.error}</div>}<span className="eyebrow"><Check size={15}/> READY TO SHARE</span><h1>Your reel is ready.</h1><p>{version.title}</p><a className="primary download-action" href={`/api/projects/${project.id}/versions/${version.id}/video?download=true`}><Download size={18}/>Download MP4</a><div className="version-choice"><label htmlFor="export-version">Version</label><select id="export-version" value={version.id} onChange={e=>{const chosen=project.versions?.find(v=>v.id===e.target.value);setProject({...project,best_version_id:e.target.value});setCaptions({...defaultCaptions,...chosen?.captions})}}>{project.versions?.map((v,i)=><option key={v.id} value={v.id}>Version {i+1}{v.captions?.mode==='custom'?' · Subtitled':''}</option>)}</select></div><CaptionStudio value={captions} onChange={setCaptions} duration={version.duration} disabled={busy} onExport={()=>act(restyle)}/><details className="secondary-tools"><summary>More options</summary><div className="secondary-tools-body"><label className="consent"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/>Allow Gemini to create a different cut</label><button className="secondary" disabled={busy||!consent||!aiReady} onClick={()=>act(start)}><RefreshCw size={17}/>Create a different cut</button>{version.decisions?.length?<details className="summary"><summary>Why it was edited this way</summary><ol className="decisions">{version.decisions.map((d,i)=><li key={i}><strong>{d.purpose}</strong> {d.why.slice(0,3).join(' · ')}</li>)}</ol></details>:null}<details className="summary"><summary>Video details</summary><dl><div><dt>Duration</dt><dd>{Math.round(version.duration)} sec</dd></div><div><dt>Clips used</dt><dd>{version.source_clips_used} / {version.total_clips}</dd></div><div><dt>Style</dt><dd>{version.style.replace('-',' ')}</dd></div></dl></details><div className="feedback"><h3>Rate this edit</h3>{feedbackDone?<p role="status">Feedback saved.</p>:<div className="feedback-buttons"><button disabled={busy} onClick={()=>act(()=>rate('good'))}>Looks good</button><button disabled={busy} onClick={()=>act(()=>rate('needs-work'))}>Needs work</button></div>}</div></div></details></div></section></>:<>
-    <div className="create-heading"><span className="eyebrow">NEW REEL</span><h1>Turn raw clips into<br/><span>a finished reel.</span></h1><p>Upload your footage, choose a look, then let the editor build the cut.</p></div>
-    {failed&&<div className="error">{project.job?.error}</div>}
-    <div className="create-layout"><section className="footage"><div className={`dropzone ${drag?'drag':''}`} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);upload(e.dataTransfer.files)}}><div className="upload-icon"><Upload size={27}/></div><h2>Drop your raw footage here</h2><p>MP4, MOV or WebM · up to 30 clips</p><button className="secondary" disabled={busy} onClick={()=>fileInput.current?.click()}>Choose files <Plus size={16}/></button><input ref={fileInput} type="file" multiple accept=".mp4,.mov,.webm" hidden onChange={e=>e.target.files&&upload(e.target.files)}/></div>{uploading&&<p className="upload-progress" role="status"><LoaderCircle size={17} className="spin"/>{uploading}</p>}
-    {clips.length>0&&<><div className="clip-count"><strong>{clips.length} clips</strong><span>{duration(total)} of footage</span></div><div className="clip-list">{clips.map((a,i)=><div className="clip-row" key={a.id}><span className="clip-index">{String(i+1).padStart(2,'0')}</span><Film size={18}/><div><strong>{a.filename}</strong><small>{a.metadata.width} × {a.metadata.height}</small></div><span>{duration(a.duration)}</span>{!project.versions?.length&&!failed&&<button className="icon" aria-label={`Remove ${a.filename}`} disabled={busy} onClick={()=>act(async()=>{await api(`/projects/${project.id}/assets/${a.id}`,{method:'DELETE'});await open(project.id)})}><X size={16}/></button>}</div>)}</div></>}
-    <p className="privacy"><ShieldCheck size={16}/>Originals stay on this computer.</p></section><aside className="options"><span className="eyebrow">EDIT SETTINGS</span><fieldset><legend>Length</legend><div className="length-buttons">{[0,30,45,60].map(n=><button aria-pressed={length===n} className={length===n?'selected':''} key={n} onClick={()=>setLength(n)}>{n?`${n}s`:'Auto'}</button>)}</div></fieldset><fieldset><legend>Pacing</legend><div className="style-buttons">{[['automatic','Automatic','Best match for your footage'],['high-energy','Fast','Quick cuts and strong moments'],['cinematic','Cinematic','Slower, more spacious pacing']].map(([id,title,desc])=><button key={id} aria-pressed={style===id} className={style===id?'selected':''} onClick={()=>setStyle(id)}><span><strong>{title}</strong><small>{desc}</small></span><span className="radio">{style===id&&<span/>}</span></button>)}</div></fieldset><CaptionStudio compact value={captions} onChange={setCaptions} duration={length||Math.min(60,Math.max(30,total*.2),total)} disabled={busy}/><fieldset><legend>Music <span className="optional">Optional</span></legend><input ref={musicInput} type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac" hidden onChange={e=>e.target.files&&upload(e.target.files,'music')}/><button disabled={busy} className="music-button" onClick={()=>musicInput.current?.click()}><Music2 size={18}/><span>{music?music.filename:'Add a song'}</span><Plus size={17}/></button>{music&&<button className="text-button" disabled={busy} onClick={()=>act(removeMusic)}>Remove music</button>}</fieldset><fieldset><legend>Your style <span className="optional">Optional</span></legend><input ref={refInput} type="file" multiple accept=".mp4,.mov,.webm" hidden onChange={e=>e.target.files&&upload(e.target.files,'reference')}/><button disabled={busy} className="music-button" onClick={()=>refInput.current?.click()}><Film size={18}/><span>{references.length?`${references.length} past edit${references.length>1?'s':''} added`:'Add videos you edited before'}</span><Plus size={17}/></button></fieldset><label className="consent"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/><span>Allow Gemini to watch this footage to plan the edit.</span></label><button className="primary create-button" disabled={!clips.length||busy||!consent||!aiReady} onClick={()=>act(start)}>{busy?<LoaderCircle size={18} className="spin"/>:<Zap size={18}/>} {failed?'Try again':'Generate edit'}<ArrowUpRight size={18}/></button><p className="output-note">9:16 · 1080p · MP4</p></aside></div>
-    </>}
-    {!working&&<div className="delete-area">{deleteConfirm?<><span>Delete this project and all its footage permanently?</span><button className="danger" disabled={busy} onClick={()=>act(async()=>{await api('/projects/'+project.id,{method:'DELETE'});await home()})}>Delete permanently</button><button className="text-button" onClick={()=>setDeleteConfirm(false)}>Keep project</button></>:<button className="text-button muted" onClick={()=>setDeleteConfirm(true)}><Trash2 size={14}/>Delete project</button>}</div>}
-  </>}
-  </main></>
+
+  async function open(id: string) {
+    const p = await api<Project>('/projects/' + id);
+    setProject(p);
+    window.scrollTo(0, 0);
+  }
+
+  async function goHome() {
+    setProject(null);
+    setError('');
+    setProjects(await api<Project[]>('/projects'));
+    window.scrollTo(0, 0);
+  }
+
+  async function create(name: string) {
+    const fallback = `My video · ${new Date().toLocaleDateString(undefined, {month: 'short', day: 'numeric'})}`;
+    const p = await api<{id: string}>('/projects', {method: 'POST', body: JSON.stringify({name: name.trim() || fallback})});
+    await open(p.id);
+  }
+
+  const working = !!project?.job && !['COMPLETED', 'FAILED'].includes(project.job.status);
+
+  return (
+    <>
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
+      <header className="app-header">
+        <button className="brand" onClick={() => ready && act(goHome)} aria-label="Vinteo, go to all videos">
+          <img className="brand-logo" src="/vinteo-logo.png" alt="" width={34} height={34} />
+          Vinteo
+        </button>
+        {ready && aiReady && !working && !showKeySetup && (
+          <button className="header-action" onClick={() => setShowKeySetup(true)}>
+            <Settings size={15} aria-hidden="true" />
+            AI settings
+          </button>
+        )}
+      </header>
+
+      <main id="main">
+        {error && <ErrorBanner message={error} onDismiss={() => setError('')} />}
+
+        {ready && (!aiReady || showKeySetup) && (
+          <KeySetup
+            replacing={aiReady}
+            onConnected={() => {
+              setAiReady(true);
+              setShowKeySetup(false);
+            }}
+            onClose={aiReady ? () => setShowKeySetup(false) : undefined}
+          />
+        )}
+
+        {checking ? (
+          <div className="loading" role="status">
+            <LoaderCircle className="spin" aria-hidden="true" />
+            Opening your workspace…
+          </div>
+        ) : !ready ? null : project ? (
+          <ProjectView
+            key={project.id}
+            project={project}
+            setProject={setProject}
+            aiReady={aiReady}
+            onHome={() => act(goHome)}
+            onOpenKeySetup={() => {
+              setShowKeySetup(true);
+              window.scrollTo(0, 0);
+            }}
+          />
+        ) : (
+          <Home projects={projects} busy={busy} onCreate={name => act(() => create(name))} onOpen={id => act(() => open(id))} />
+        )}
+      </main>
+    </>
+  );
 }
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
+
+createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
